@@ -20,15 +20,29 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"; cd "$ROOT"
 MOTION="${1:?사용법: render_release.sh <rollout.motion> [out.mp4] [프레임수]}"
 OUT="${2:-${MOTION%.motion}.mp4}"
 NFRAMES="${3:-}"
-# 렌더러는 isaacsim **pip 패키지**로 돈다 — requirements-lock.txt 로 만든 venv 의
-#   파이썬이면 그대로 실행된다(standalone IsaacSim 설치 불필요).
-#   standalone 을 쓰고 싶으면 ISAACSIM=<경로>/python.sh 로 덮어쓴다.
+# ★★ 렌더러는 **standalone IsaacSim** 의 kit 파이썬으로 돌아야 한다.
+#   pip `isaacsim` 패키지만으로는 안 된다 — 기본 experience 가 요구하는 확장이
+#   빠져 있어 앱이 뜨지 않고(No versions of isaacsim.anim.robot.schema …),
+#   대체 experience 를 쓰면 writer 가 프레임당 PNG 를 40~100장 써서 mimsave 가
+#   OOM 으로 죽는다(2026-09-01 실측). 자세한 근거는 RELEASE.md ★★ 항목.
+#   추론(run_release.sh)은 venv 로 정상 동작한다 — 이 제약은 렌더에만 해당한다.
 PYTHON="${PYTHON:-python}"
-RUNNER="${ISAACSIM:-$PYTHON}"
 export OMNI_KIT_ACCEPT_EULA=YES     # 없으면 대화형 EULA 프롬프트에서 멈춘다
-"$RUNNER" -c "import isaacsim" 2>/dev/null || {
+[ -n "${ISAACSIM:-}" ] || {
+  cat <<'MSG'
+✗ ISAACSIM 이 설정되지 않았다 — 렌더에는 standalone IsaacSim 6.0.1 이 필요하다.
+
+    ISAACSIM=/path/to/IsaacSim-6.0.1/python.sh bash render_release.sh <rollout>.motion
+
+  pip isaacsim(venv)으로는 렌더가 되지 않는다. 근거는 RELEASE.md 의 ★★ 항목.
+  IsaacSim 6.0.1 은 NVIDIA 에서 내려받는다(약 28 GB).
+MSG
+  exit 1; }
+RUNNER="$ISAACSIM"
+[ -x "$RUNNER" ] || { echo "✗ 실행할 수 없다: $RUNNER"; exit 1; }
+"$RUNNER" -c "import isaacsim" >/dev/null 2>&1 || {
   echo "✗ isaacsim 을 import 할 수 없다: $RUNNER"
-  echo "  venv 를 활성화했는지 확인 (RELEASE.md '환경 만들기')"; exit 1; }
+  echo "  standalone IsaacSim 의 python.sh 를 가리키는지 확인할 것"; exit 1; }
 
 NPZ="etri_라이선스동의_다운로드/smpl_models/smpl/SMPL_NEUTRAL.npz"
 [ -f "$NPZ" ] || { echo "✗ SMPL 바디모델 없음: $NPZ"; echo "  RELEASE.md 의 'SMPL 바디모델 받는 법' 참조"; exit 1; }

@@ -68,8 +68,11 @@ MOTION=tasks_for_smpl/mimic_smpl/motions/test-motion-36-foot/walk_cmu_02_01.moti
 
 ```bash
 source venv_il3/bin/activate
-bash render_release.sh recordings/S2_flat/*/*.motion
+ISAACSIM=/path/to/IsaacSim-6.0.1/python.sh \
+  bash render_release.sh recordings/S2_flat/*/*.motion
 ```
+
+> `ISAACSIM` 은 **생략할 수 없다** — pip `isaacsim` 만으로는 렌더가 안 된다(위 ★★ 참조).
 
 GPU 1장이면 충분하다. 여러 장인 머신에서는 `CUDA_VISIBLE_DEVICES` 로 고른다.
 
@@ -109,9 +112,23 @@ mp4 옆에 `RENDER_LOOK.txt` 가 생겨 **실제 적용된 값이 기록**된다
 **필요한 것은 하나뿐이다** — ★ **SMPL 바디모델** `SMPL_NEUTRAL.npz`.
 라이선스 자산이라 이 릴리즈에 없다(아래 "받는 법"). 없으면 ②만 실패하고 ①은 정상 동작한다.
 
-> **IsaacSim 을 따로 설치할 필요는 없다.** `isaacsim` 은 `requirements-lock.txt` 에 든
-> pip 패키지라 위에서 만든 venv 의 파이썬으로 렌더까지 돈다. standalone IsaacSim 을
-> 쓰고 싶으면 `ISAACSIM=<경로>/python.sh` 로 덮어쓸 수 있다.
+> ★★ **렌더에는 standalone IsaacSim 6.0.1 이 필요하다** (추론①은 venv 만으로 된다).
+> `requirements-lock.txt` 의 pip `isaacsim` 패키지만으로는 **렌더가 안 된다** —
+> 기본 experience(`isaacsim.exp.base`)가 요구하는 확장이 pip 배포본에 빠져 있어
+> 앱이 뜨지 않는다(`No versions of isaacsim.anim.robot.schema …`, 이어서
+> `replicator.agent.schema`, `util.debug_draw` … 계속 나온다).
+>
+> 대체 experience(`isaaclab.python.headless.rendering.kit`)를 지정하면 앱은 뜨지만
+> **writer 가 프레임당 PNG 를 40~100장** 쓴다. 1222프레임이면 11만 장이 되고 마지막
+> `imageio.mimsave` 가 전부 RAM 에 올려 283 GB 를 요구해 OOM 으로 죽는다
+> (2026-09-01 실측). `rt_subframes` 축소와 `set_capture_on_play(False)` 로는 해결되지
+> 않는다 — standalone 을 쓰는 것만이 확인된 해법이다(PNG 60/60 프레임 검증).
+>
+> ```bash
+> ISAACSIM=/path/to/IsaacSim-6.0.1/python.sh bash render_release.sh <rollout>.motion
+> ```
+> IsaacSim 6.0.1 은 NVIDIA 에서 내려받는다(약 28 GB). 설치 위치는 어디든 되고
+> `python.sh` 가 자기 위치 기준으로 동작하므로 폴더째 옮겨도 된다.
 
 ### SMPL 바디모델 받는 법
 
@@ -309,7 +326,8 @@ ROS2 시스템 패키지(개발 머신이 시스템 ROS 를 흡수해 딸려온 
 > 다르게 보이면 여기를 먼저 의심할 것.
 
 > 렌더링은 이 venv 가 아니라 IsaacSim 자체 kit 파이썬(`IsaacSim-6.0.1/python.sh`)으로 돈다.
-> 학습·추론은 venv, 렌더는 kit 파이썬인 이원 구조다.
+> 학습·추론은 venv, 렌더는 kit 파이썬인 이원 구조다 — **선택이 아니라 필수다.**
+> 이유는 "① 추론 / ② 렌더" 절의 ★★ 항목에 있다.
 
 ## 알려진 사항
 

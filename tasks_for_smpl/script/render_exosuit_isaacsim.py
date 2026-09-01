@@ -75,7 +75,20 @@ OUT = sys.argv[3] if len(sys.argv) > 3 else f"/tmp/exosuit_{SUIT}_{MODE}.mp4"
 NFR = int(sys.argv[4]) if len(sys.argv) > 4 else 240
 assert MODE in ("train", "eval"), MODE
 
-sim = SimulationApp({"headless": True})
+import os as _os_early   # SimulationApp 보다 먼저 필요 (아래 experience 선택)
+
+# [2026-09-01] experience 파일을 고를 수 있게 한다.
+#   기본(isaacsim.exp.base.python.kit)은 standalone IsaacSim 설치를 전제한다. pip 설치
+#   환경에서는 확장(isaacsim.anim.robot.schema 등)이 없어 "dependency solver failure" 로
+#   죽는다. IsaacLab 의 headless.rendering.kit 은 pip 환경에서도 뜬다.
+#     ISAACSIM_EXPERIENCE=<...>/isaaclab.python.headless.rendering.kit
+_exp = _os_early.environ.get("ISAACSIM_EXPERIENCE", "")
+_app_cfg = {"headless": True}
+if _exp:
+    print(f"[experience] {_exp}")
+    sim = SimulationApp(_app_cfg, experience=_exp)
+else:
+    sim = SimulationApp(_app_cfg)
 
 # 고품질 렌더: RTX 패스트레이싱 + 다중 샘플 (render_seamless_isaacsim.py 와 동일)
 import carb  # noqa: E402
@@ -590,8 +603,26 @@ def lookat_mat(eye, tgt):
     return M
 
 
+# RTX 수렴용 서브프레임 수. **환경에 따라 writer 가 서브프레임마다 PNG 를 쓴다** —
+# standalone IsaacSim 은 스텝당 1장이지만, pip isaacsim + isaaclab 렌더링 경험에서는
+# 48장을 전부 쓴다. 1222프레임이 47,000장이 되어 mimsave 에서 OOM 이었다(2026-09-01).
+# 그런 환경에서는 RT_SUBFRAMES=1 로 낮춘다 — 화질은 조금 덜 수렴한다.
+RT_SUBFRAMES = int(os.environ.get("RT_SUBFRAMES", "48"))
 OUTDIR = tempfile.mkdtemp(prefix=f"exosuit_{SUIT}_{MODE}_")
 _RW, _RH = (1080, 1920) if os.environ.get("PORTRAIT") == "1" else (1920, 1080)  # [ETRI] 세로모드
+# ★ captureOnPlay 를 끈다 — 켜져 있으면 writer 가 **앱 업데이트마다** 캡처한다.
+#   standalone IsaacSim 은 기본이 꺼짐이라 스텝당 PNG 1장이지만, pip isaacsim +
+#   isaaclab.python.headless.rendering.kit 경험에서는 켜져 있어 60프레임에 5,514장
+#   (프레임당 92장)이 나왔다. 1222프레임이면 11만 장 → mimsave 에서 OOM 이다
+#   (2026-09-01 서버). 우리는 orchestrator.step() 으로 프레임을 직접 몰기 때문에
+#   자동 캡처는 필요 없다 — 명시적으로 꺼서 두 환경의 동작을 같게 만든다.
+try:
+    rep.orchestrator.set_capture_on_play(False)
+except Exception as _e:                      # API 이름이 다른 판이면 carb 설정으로
+    import carb
+    carb.settings.get_settings().set("/omni/replicator/captureOnPlay", False)
+    print(f"[captureOnPlay] set_capture_on_play 불가({_e}) → carb 설정 사용")
+
 render_prod = rep.create.render_product("/World/Cam", (_RW, _RH))
 writer = rep.WriterRegistry.get("BasicWriter")
 writer.initialize(output_dir=OUTDIR, rgb=True)
@@ -670,7 +701,7 @@ for i in range(NFR):
         eye = tgt + np.array([1.0, -3.6, 0.45])
     cam_op.Set(lookat_mat(eye, tgt))
     sim.update()
-    rep.orchestrator.step(rt_subframes=48, delta_time=0.0, pause_timeline=True)
+    rep.orchestrator.step(rt_subframes=RT_SUBFRAMES, delta_time=0.0, pause_timeline=True)
     if i % 30 == 0:
         print(f"  frame {i+1}/{NFR}")
 rep.orchestrator.wait_until_complete()
