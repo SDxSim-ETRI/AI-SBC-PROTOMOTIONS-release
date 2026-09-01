@@ -1,0 +1,31 @@
+{
+  "robot_name": "smpl_exosuitHS",
+  "simulator": "isaaclab",
+  "num_envs": 16384,
+  "batch_size": 65536,
+  "motion_file": "/home/user/PM_Tasks/tasks_for_smpl/mimic_smpl/motions/test_motion_36_foot.pt",
+  "experiment_path": "tasks_for_smpl/mimic_smpl_exosuitHS/mimic/mlp_actionnet_m36.py",
+  "experiment_name": "output_IL_s2p_exosuitHS_motions36",
+  "save_dir": "/home/user/PM_Tasks/tasks_for_smpl/mimic_smpl_exosuitHS/output_IL_s2p_exosuitHS_motions36",
+  "scenes_file": null,
+  "checkpoint": null,
+  "checkpoint_dir": null,
+  "use_wandb": false,
+  "wandb_project": "physical_animation",
+  "use_slurm": false,
+  "ngpu": 1,
+  "nodes": 1,
+  "headless": true,
+  "seed": 0,
+  "torch_deterministic": false,
+  "training_max_steps": 10000000000000,
+  "training_max_iterations": null,
+  "overrides": [
+    "robot.asset.etri_prebuilt_usd=/home/user/PM_Tasks/tasks_for_smpl/mimic_smpl/data/assets/usd_isaaclab_exosuitHS/smpl_humanoid_exosuitHS_for_train.usda",
+    "agent.save_epoch_checkpoint_every=200",
+    "env.ref_respawn_offset=0.0",
+    "env.frozen_human_ckpt=/home/user/PM_Tasks/tasks_for_smpl/mimic_smpl/output_IL_s1_exosuitHS_motions36/epoch_200.ckpt"
+  ],
+  "create_config_only": false,
+  "wandb_id": null
+}
