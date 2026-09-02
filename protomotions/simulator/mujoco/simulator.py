@@ -644,14 +644,30 @@ class MujocoSimulator(Simulator):
             kd_scaled = kd / gear
             effort_scaled = effort / gear
 
+            # [ETRI patch 2026-09-02] gear 보정이 bias 항에 한 번 더 필요하다.
+            #   MuJoCo 의 affine bias 는 **관절 위치가 아니라 액추에이터 길이**에
+            #   작용한다. joint transmission 에서 actuator_length = gear * qpos,
+            #   actuator_velocity = gear * qvel 이므로:
+            #     scalar_force = gainprm[0]*ctrl + biasprm[1]*(gear*q) + biasprm[2]*(gear*qd)
+            #   biasprm 에 -kp_scaled(= -kp/gear) 를 넣으면 q 항에 gear 가 남아
+            #     joint_torque = kp*ctrl - kp*gear*q - kd*gear*qd   ← PD 가 아니다
+            #   가 된다. gear 로 한 번 더 나눠야 의도한 PD 가 성립한다:
+            #     joint_torque = kp*(ctrl - q) - kd*qd              ✓
+            #   영향: 이 저장소의 자산은 gear != 1 이다
+            #   (smpl_humanoid.xml 69개 gear=500, exosuitHS 71개 gear=23.7/500)
+            #   → MuJoCo 로 돌릴 때 게인이 gear 배 왜곡됐다.
+            #   ※ 릴리즈 실행 경로(run_release.sh / render_release.sh)는
+            #      --simulator isaaclab 이므로 배포된 체크포인트의 거동에는 영향이 없다.
+            #      upstream 버그이므로 NVlabs/ProtoMotions 에 PR 도 올린다.
             # Configure as position actuator:
-            # scalar_force = kp_scaled * (ctrl - q) - kd_scaled * qd
-            # joint_torque = scalar_force * gear = kp * (ctrl - q) - kd * qd  ✓
+            # scalar_force = kp_scaled*ctrl - (kp_scaled/gear)*(gear*q) - (kd_scaled/gear)*(gear*qd)
+            #             = kp_scaled*ctrl - kp_scaled*q - kd_scaled*qd
+            # joint_torque = scalar_force * gear = kp*(ctrl - q) - kd*qd  ✓
             self.model.actuator_gainprm[act_idx, 0] = kp_scaled
             self.model.actuator_biastype[act_idx] = 1  # mjBIAS_AFFINE
             self.model.actuator_biasprm[act_idx, 0] = 0.0
-            self.model.actuator_biasprm[act_idx, 1] = -kp_scaled
-            self.model.actuator_biasprm[act_idx, 2] = -kd_scaled
+            self.model.actuator_biasprm[act_idx, 1] = -kp_scaled / gear
+            self.model.actuator_biasprm[act_idx, 2] = -kd_scaled / gear
 
             # Set force limits on actuator (in scalar units, gear compensated)
             self.model.actuator_forcerange[act_idx, 0] = -effort_scaled
