@@ -14,13 +14,26 @@ PYTHON="${PYTHON:-python}"
 export OMNI_KIT_ACCEPT_EULA=YES     # 없으면 대화형 EULA 프롬프트에서 멈춘다
 # GPU 를 골라 쓰려면: CUDA_VISIBLE_DEVICES=3 bash run_release.sh S2_flat
 
-STAGE="${1:-S1}"     # S1 | S2_flat   (S0 는 릴리즈하지 않는다 — 아래 참조)
+STAGE="${1:-S1}"     # S1 | S2_flat | S1_rough | S2_rough   (S0 는 릴리즈하지 않는다)
+CK=tasks_for_smpl/mimic_smpl/checkpoints
+USDDIR=tasks_for_smpl/mimic_smpl/data/assets/usd_isaaclab_exosuitHS
+# 체형 평가용 자산은 BODY 로 고른다 — 기본은 학습 체형(v2 = std)
+#   BODY=short|std|tall|tall15|tall20  (betas −1.0 / 0.0 / +1.0 / +1.5 / +2.0)
+BODY="${BODY:-}"
+USD=$USDDIR/smpl_humanoid_exosuitHS_for_train_v2.usda
+[ -n "$BODY" ] && USD=$USDDIR/smpl_humanoid_exosuitHS_for_train_${BODY}.usda
+# 지형 단계는 loop1200 3클립(속도 3종)으로 평가한다 — 학습이 그 세트였다.
+MOT36=tasks_for_smpl/mimic_smpl/motions/test_motion_36_foot.pt
+MOTLOOP=tasks_for_smpl/mimic_smpl/motions/test-motion-loop1200/loop1200_3motions.yaml
+[ -n "$BODY" ] && MOTLOOP=tasks_for_smpl/mimic_smpl/motions/test-motion-loop1200-${BODY}/loop1200_3motions.yaml
 case "$STAGE" in
-  S1)      CKPT=tasks_for_smpl/mimic_smpl/checkpoints/S1/last.ckpt;      USD=tasks_for_smpl/mimic_smpl/data/assets/usd_isaaclab_exosuitHS/smpl_humanoid_exosuitHS_for_train.usda ;;
-  S2_flat) CKPT=tasks_for_smpl/mimic_smpl/checkpoints/S2_flat/last.ckpt; USD=tasks_for_smpl/mimic_smpl/data/assets/usd_isaaclab_exosuitHS/smpl_humanoid_exosuitHS_for_train.usda ;;
-  *) echo "usage: run_release.sh [S1|S2_flat]"; exit 1 ;;
+  S1)       CKPT=$CK/S1/last.ckpt;       DEFMOT=$MOT36;   FROZEN_OF="" ;;
+  S2_flat)  CKPT=$CK/S2_flat/last.ckpt;  DEFMOT=$MOT36;   FROZEN_OF=$CK/S1/last.ckpt ;;
+  S1_rough) CKPT=$CK/S1_rough/last.ckpt; DEFMOT=$MOTLOOP; FROZEN_OF="" ;;
+  S2_rough) CKPT=$CK/S2_rough/last.ckpt; DEFMOT=$MOTLOOP; FROZEN_OF=$CK/S1_rough/last.ckpt ;;
+  *) echo "usage: run_release.sh [S1|S2_flat|S1_rough|S2_rough]   (env: BODY=short|std|tall|tall15|tall20)"; exit 1 ;;
 esac
-MOTION="${MOTION:-tasks_for_smpl/mimic_smpl/motions/test_motion_36_foot.pt}"
+MOTION="${MOTION:-$DEFMOT}"
 OUTDIR="${OUT:-recordings/$STAGE}"
 
 # S2 는 보조 토크를 사이드카로 남긴다 — ②렌더가 이걸 읽어 슈트를 힘 세기 색으로 칠한다.
@@ -28,15 +41,19 @@ OUTDIR="${OUT:-recordings/$STAGE}"
 # 출력 폴더는 단계와 무관하게 미리 만든다 — recordings/ 는 저장소에 없다(.gitignore).
 mkdir -p "$OUTDIR"
 EXO_LOG=""
-[ "$STAGE" = "S2_flat" ] && EXO_LOG="$ROOT/$OUTDIR/exo_torque.pt"
+case "$STAGE" in S2_flat|S2_rough) EXO_LOG="$ROOT/$OUTDIR/exo_torque.pt" ;; esac
 
 # ★ S2 는 frozen_human_ckpt 를 덮어써야 한다 — 체크포인트의 resolved config 에
 #   학습 당시 절대경로(예: /home/user/PM_Tasks/...)가 박혀 있어 받는 쪽에서는
 #   그대로 쓸 수 없다. 이 트리의 S1 을 가리키도록 바꿈. (2026-09-01 서버 실행에서 발견)
 #   S1 폴더에 resolved_configs.pt 가 함께 있어야 actor 구조를 복원할 수 있다.
 FROZEN_OVERRIDE=""
-[ "$STAGE" = "S2_flat" ] && \
-  FROZEN_OVERRIDE="env.frozen_human_ckpt=$ROOT/tasks_for_smpl/mimic_smpl/checkpoints/S1/last.ckpt"
+[ -n "$FROZEN_OF" ] && FROZEN_OVERRIDE="env.frozen_human_ckpt=$ROOT/$FROZEN_OF"
+
+# ★ border_size 는 **평지 전용**이다. 지형 단계에 주면 terrain_sequence 배치가
+#   달라져 학습과 다른 지형을 깔게 된다 — 지형에서는 체크포인트 설정을 그대로 쓴다.
+BORDER=""
+case "$STAGE" in S1|S2_flat) BORDER="terrain.border_size=120.0" ;; esac
 
 EXO_TORQUE_LOG="$EXO_LOG" "$PYTHON" protomotions/inference_agent.py \
   --checkpoint "$CKPT" \
@@ -44,7 +61,7 @@ EXO_TORQUE_LOG="$EXO_LOG" "$PYTHON" protomotions/inference_agent.py \
   --simulator isaaclab --num-envs 1 --headless --auto-record \
   --record-steps "${STEPS:-300}" --recording-path "$OUTDIR" \
   --overrides "robot.asset.etri_prebuilt_usd=$ROOT/$USD" \
-              "env.ref_respawn_offset=0.0" "terrain.border_size=120.0" $FROZEN_OVERRIDE
+              "env.ref_respawn_offset=0.0" $BORDER $FROZEN_OVERRIDE
 # ★ terrain.border_size=120.0 (기본 40.0) — 긴 모션에서 캐릭터가 지면 밖으로
 #   걸어 나가는 것을 막는다. 기본값이면 지면이 280 m 이고 격자가 [40,240] 인데,
 #   스폰이 격자 끝(x≈238)에 잡히면 남은 거리가 42 m 뿐이다. 02_01 loop1200 은

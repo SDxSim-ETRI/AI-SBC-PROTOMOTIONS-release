@@ -3,16 +3,24 @@
 SMPL 휴머노이드에 엉덩관절 모터 2개짜리 보조 슈트를 입히고 걷게 한 정책과, 그것을
 링크 없이 바로 실행할 수 있는 최소 자산 묶음이다.
 
-- **코드 리비전**: `8b172e9131326c7e47a97f47c4923530dc974407` (2026-08-26, upstream 병합)
-- **조립일**: 2026-09-01
-- **릴리즈 태그**: hs-flat
+- **릴리즈 태그**: **v1.0** (2026-09-10) — 이 저장소의 첫 정식 태그
+- **자산 세대**: **hs2** (`_for_train_v2`). hs1 자산은 제거했다 — 가방 부착 위치와 대퇴 box 가
+  달라 **두 세대의 기준선 Nm 을 서로 쓸 수 없다** (`docs/NAMING.md`)
+- **담긴 정책**: 평지 2 + **지형 2 = 4종.** 어느 시드를 왜 골랐는지는
+  **`docs/RELEASE_CHECKPOINT_MAP.md`**
+- **코드 리비전**: `8b172e9` (2026-08-26, upstream 병합)
 
 ## 담긴 것
 
 | 경로 | 내용 |
 |---|---|
 | `tasks_for_smpl/mimic_smpl/checkpoints/S1/last.ckpt` | **S1** — 슈트 무게 적응(모터 끔). 사람 걷기 정책 |
-| `tasks_for_smpl/mimic_smpl/checkpoints/S2_flat/last.ckpt` | **S2** — 평지 모터 보조. S1을 동결하고 모터 출력만 학습 |
+| `tasks_for_smpl/mimic_smpl/checkpoints/S2_flat/last.ckpt` | **S2 평지** — 모터 보조. S1 을 동결하고 모터 출력만 학습 |
+| `tasks_for_smpl/mimic_smpl/checkpoints/S1_rough/last.ckpt` | **S1 지형** — 복합지형(경사·러프·계단·평지) 무게 적응. 커리큘럼 A~E 종점 |
+| `tasks_for_smpl/mimic_smpl/checkpoints/S2_rough/last.ckpt` | **S2 지형** — 지형 위 모터 보조 |
+| `tasks_for_smpl/mimic_smpl/motions/test-motion-loop1200-{short,std,tall,tall15,tall20}/` | **체형별 레퍼런스 모션** — betas −1.0 / 0.0 / +1.0 / +1.5 / +2.0. 관절각은 동일하고 body 위치만 각 체형 FK 로 다시 푼 것 |
+| `tasks_for_smpl/mimic_smpl/terrains/`, `mimic/mlp_rough_*.py`, `mimic_smpl_exosuitHS/mimic/mlp_actionnet_rough.py` | **지형 정책 로드에 필수** — 체크포인트 설정이 `EtriSlopeCapTerrainConfig` 를 이름으로 참조한다 |
+| `docs/RELEASE_CHECKPOINT_MAP.md` | 어느 학습 산출물이 어느 체크포인트인지 · **시드 선택 근거** |
 | `tasks_for_smpl/mimic_smpl/motions/test_motion_36_foot.pt` | 참조 모션 36종 패키징본 (AMASS/CMU) — 학습·평가용 |
 | `tasks_for_smpl/mimic_smpl/motions/test-motion-36-foot/` | 같은 36종의 **개별 `.motion` 파일** — 한 동작씩 추론·녹화할 때 |
 | `tasks_for_smpl/mimic_smpl/motions/test-motion-loop1200/` | **시각화용 1200스텝 루프 클립 3종** (02_01 느림 / 103_07 보통 / 39_03 빠름) |
@@ -35,12 +43,30 @@ SMPL 휴머노이드에 엉덩관절 모터 2개짜리 보조 슈트를 입히�
 
 ```bash
 source venv_il3/bin/activate          # 위에서 만든 환경
-bash run_release.sh S1                # 슈트 입고 걷기 (모터 끔)
-bash run_release.sh S2_flat           # 모터 보조 켬
+bash run_release.sh S1                # 평지 · 슈트 입고 걷기 (모터 끔)
+bash run_release.sh S2_flat           # 평지 · 모터 보조 켬
+bash run_release.sh S1_rough          # 지형 · 모터 끔
+bash run_release.sh S2_rough          # 지형 · 모터 보조 켬
 
 # GPU 를 골라 쓰려면
 CUDA_VISIBLE_DEVICES=3 bash run_release.sh S2_flat
+
+# 다른 체형으로 평가 (학습은 표준 체형 하나뿐 — 재학습 없이 물리는 것)
+BODY=tall20 bash run_release.sh S2_rough    # betas +2.0, 맨몸 86.1 kg
+BODY=short  bash run_release.sh S2_rough    # betas −1.0, 맨몸 54.0 kg
+#   BODY 를 주면 자산과 레퍼런스 모션이 함께 그 체형으로 바뀐다.
+#   생략하면 학습 체형(std = v2)이다.
 ```
+
+**단계별 기본 모션이 다르다** — 평지는 36종 패키징본, 지형은 학습에 쓴 `loop1200` 3클립
+(속도 1.19 / 1.28 / 1.52 m/s)이다. `MOTION=<경로>` 로 바꿀 수 있다.
+
+**스크립트가 자동으로 처리하는 것 셋** (직접 넘기지 않아도 된다):
+- `env.frozen_human_ckpt` — S2 계열은 이 트리의 S1 을 가리키게 덮어쓴다.
+  체크포인트에 박힌 경로는 **학습 머신의 절대경로**라 그대로 쓰면 실패한다.
+- `env.ref_respawn_offset=0.0` — 프레임워크 기본값 0.05 는 리셋 때 캐릭터를 50 mm 띄운다.
+- `terrain.border_size=120.0` — **평지 단계에만** 준다. 지형에 주면 배치가 달라져
+  학습과 다른 지형을 깔게 된다.
 
 > 두 스크립트 모두 `OMNI_KIT_ACCEPT_EULA=YES` 를 넘긴다. 이걸 빼면 IsaacSim 이
 > 대화형 EULA 프롬프트에서 멈춘다(비대화형 실행이면 그대로 죽는다).

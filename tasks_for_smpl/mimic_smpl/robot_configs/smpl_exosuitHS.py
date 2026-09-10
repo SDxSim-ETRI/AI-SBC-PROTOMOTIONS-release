@@ -60,11 +60,15 @@ class SmplExosuitHSRobotConfig(SmplRobotConfig):
     asset: RobotAssetConfig = field(
         default_factory=lambda: RobotAssetConfig(
             asset_root=_ASSET_ROOT,
-            asset_file_name="mjcf_newton_exosuitHS/smpl_humanoid_exosuitHS_for_train.xml",
+            asset_file_name="mjcf_newton_exosuitHS/smpl_humanoid_exosuitHS_for_train_v2.xml",
+            # [ETRI 2026-09-07] hs2(_v2) 로 전환. hs1 은 `data/assets/_backup/hs1_20260907/`
+            #   로 격리됐다(사용자 지정: 논문에서 hs1↔hs2 를 비교하지 않는다).
+            #   v1↔v2 는 joint 70·motor 71·body 24 가 **완전 동일**해서 여기서 뽑는
+            #   kinematic_info/control_info 는 바뀌지 않는다 — 다른 것은 관성·형상뿐.
             # IsaacLab 학습·렌더용. Newton 학습에는 불필요(MJCF 직접 사용).
             # 변환: IsaacLab convert_mjcf.py (usd_isaaclab_exosuitHS/ 는 아직 비어 있음)
             # [ETRI patch] upstream 이 RobotAssetConfig 에서 제거한 필드
-            # usd_asset_file_name="usd_isaaclab_exosuitHS/smpl_humanoid_exosuitHS_for_train.usda",
+            # usd_asset_file_name="usd_isaaclab_exosuitHS/smpl_humanoid_exosuitHS_for_train_v2.usda",
             # [ETRI patch] upstream 이 RobotAssetConfig 에서 제거한 필드
             # usd_bodies_root_prim_path="/World/envs/env_.*/Robot/bodies/",
             max_linear_velocity=1000.0,

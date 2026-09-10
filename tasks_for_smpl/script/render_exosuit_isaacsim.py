@@ -39,7 +39,11 @@ Usage:
   /home/user/miniforge3/envs/env_isaaclab/bin/python \
       tasks_for_smpl/script/render_exosuit_isaacsim.py <hs|cr> <train|eval> <out.mp4> [nframes]
 
-  env: CAM=turntable|front_rel|back_rel|side_rel|front|side  (기본 turntable=360° 회전)
+  env: CAM=turntable|front_rel|back_rel|side_rel|front|side|side_static|quad_rel  (기본 turntable)
+       ★ quad_rel = CAM_SEG(300) 프레임마다 정면→좌측면→후면→우측면 (장척 모션용)
+       ★ side_static = **완전 정지** 측면(2026-09-08). 궤적 전체가 들어오도록 화각에서
+         거리를 역산한다. 조절: CAM_BLEND(0=추종거리 1=전체포함, 기본 0.5)
+         CAM_PAD(1.6) CAM_VSPAN(2.3) CAM_RISE(0.35) CAM_PAD_MIN(잘림하한 여백 0.9)
        ★ *_rel = **진행방향 기준** 상대 카메라(2026-08-28 추가). 모션의 월드 방향이
          달라도 항상 같은 앵글이 나온다. front_rel = 사람을 정면에서 바라봄.
          CAM_YAW(도) 로 각도 미세조정, CAM_SMOOTH(프레임) 로 평활 창 조절(기본 45).
@@ -217,7 +221,30 @@ def load_exo_torque(path, nframes):
 #: eval 렌더에서 primitive 로 그리는 슈트 파트 (CAD STL 이 없다)
 # [ETRI 2026-08-26] 힙링 제거 — 허벅지 CAD 스트럿(left/right_leg.stl)과 겹쳐 보여
 #   사용자 판단으로 감추기로 했다. 가방만 primitive 로 남긴다(CAD 없음).
-KEEP_PRIMS = ("exo_main_col",)
+# [ETRI 2026-09-07] 허벅지링 **부활**. 2026-08-26 에 뺀 이유는 "CAD 스트럿과 겹쳐 보인다"
+#   였는데, 2026-09-04 에 링을 살 단면 중심으로 옮기고 수평 원기둥으로 눕히면서
+#   (center_hip_ring_on_thigh.py) 스트럿과 겹치지 않고 허벅지를 감는 띠로 보이게 됐다.
+#   되돌리려면 HIDE_HIP_RING=1.
+KEEP_PRIMS = ("exo_main_col",) if os.environ.get("HIDE_HIP_RING") == "1" \
+    else ("exo_main_col", "left_hip_ring", "right_hip_ring")
+# [ETRI 2026-09-02] 케이블판(exosuitHS_cable) 의 고정 스트랩은 **이름으로 추가 판별**한다.
+#   `*_cable_*` / `*_anchor_*` geom 은 CAD STL 에 대응 파트가 없고, 그 자산의 존재 이유가
+#   바로 이 스트랩을 보여주는 것이라 eval 에서도 그린다. 색은 EXO_RGB(금속 회색) 대신
+#   **XML 의 rgba 를 그대로** 쓴다(하이퍼셀 문서 4~5p 의 빨간 앵커/케이블).
+#   원본 hs 에는 이런 이름의 geom 이 없어 아무 영향이 없다.
+STRAP_KEYS = ("_cable_", "_anchor_")
+
+
+def is_strap(name):
+    return bool(name) and any(k in name for k in STRAP_KEYS)
+
+
+def geom_rgb(g, fallback):
+    """MJCF geom 의 rgba 앞 3개. 없으면 fallback."""
+    try:
+        return tuple(float(x) for x in g.get("rgba", "").split()[:3]) or fallback
+    except ValueError:
+        return fallback
 # 스킨 재질: flat = 재질 없이 displayColor(기존 룩) / 그 외는 UsdPreviewSurface 프리셋
 #   skin_rubber ★릴리즈 룩 — 갈색 무광 고무. 클리어코트 0 이라 광택층이 없다.
 #               (2026-08-28 프리셋으로 승격. 그전까지는 rubber + MAT_RGB/ROUGH/CLEARCOAT
@@ -236,7 +263,10 @@ SMOOTH = os.environ.get("SMOOTH", "1") != "0"
 R_CAD2MJCF = exosuit_spec.cad_rot_np(SUIT)
 CAD_ANCHOR_MM = np.array(SPEC["cad_anchor_mm"]) if SPEC["cad_anchor_mm"] else None
 PELVIS_ANCHOR = np.array(SPEC["pelvis_anchor"])
-EXO_MESHES = [(n, fn, b) for n, fn, b, _flex in SPEC["cad_meshes"]]
+# SKIN_ONLY=1 이면 슈트 CAD 를 아예 올리지 않는다 — **살 이음새 확인용**.
+#   슈트가 골반·허벅지를 가려서 LBS 스키닝의 이음매를 눈으로 보기 어렵다.
+EXO_MESHES = [] if os.environ.get("SKIN_ONLY") == "1" else \
+    [(n, fn, b) for n, fn, b, _flex in SPEC["cad_meshes"]]
 exo_color_attr = {}          # 메시명 → displayColor 속성 (보조색 갱신용)
 EXO_TAU, _exo_meta = load_exo_torque(EXO_TORQUE_LOG, NFR)
 EXO_NAMES, EXO_PEAK = _exo_meta if _exo_meta else ([], None)
@@ -341,12 +371,64 @@ def prim_from_mjcf_geom(path, g, rgb):
         prim = UsdGeom.Cube.Define(stage, path)
         prim.CreateSizeAttr(2.0)
         Rl = Rl @ np.diag([float(v) for v in size[:3]])     # half-extent 를 변환에 곱한다
+    elif gt == "sphere":
+        # [ETRI 2026-09-02] sphere 추가. 그 전에는 여기서 조용히 return None 이 돼
+        # 구 geom 이 **말없이 사라졌다** — 케이블판의 앵커 8개가 그렇게 누락됐다
+        # (로그에는 "그렸다"고 찍히는데 화면에 없어 원인 찾기가 오래 걸린다).
+        prim = UsdGeom.Sphere.Define(stage, path)
+        prim.CreateRadiusAttr(size[0])
     else:
         return None
     UsdGeom.Xformable(prim).AddTransformOp(
         UsdGeom.XformOp.PrecisionDouble, "local").Set(mat4(Rl, pos))
     prim.CreateDisplayColorAttr([Gf.Vec3f(*rgb)])
     return prim
+
+
+def _EVAL_XML_PATH():
+    """eval XML 경로. EVAL_XML 환경변수 > **_v2** > lbskin 판 > 구 for_eval 판.
+
+    ★ _v2 를 맨 앞에 둔다 (2026-09-07): v1·v2 가 같은 폴더에 공존하는데 폴백이 v1 을
+      집으면 **옛 CAD 조립**으로 렌더된다. 9/7 에 스트럿 5.8 cm 이탈 영상 17편을
+      만든 사고가 바로 이 계열(배치값이 자산과 어긋남)이었다.
+    """
+    c = [_P["dir"] / f"smpl_humanoid_{SPEC['label']}_for_eval_lbskin_v2.xml",
+         _P["dir"] / f"smpl_humanoid_{SPEC['label']}_for_eval_lbskin.xml",
+         _P["dir"] / f"smpl_humanoid_{SPEC['label']}_for_eval.xml"]
+    return os.environ.get("EVAL_XML") or str(next((x for x in c if x.exists()), c[0]))
+
+
+def _cad_placement_from_xml():
+    """eval XML 에서 `mesh_<name>` geom 의 **작성 pos/quat** 을 읽어 body-로컬 변환을 만든다.
+
+    반환: {mesh 이름: (3x3 회전, 3벡터 위치)} — 없으면 빈 dict (호출측이 폴백).
+    ★ mjModel 을 쓰면 안 된다: 컴파일러가 mesh 내부 오프셋을 geom_pos 에 섞고
+      geom_quat 에도 메시 주축 회전을 합성한다(2026-09-04 실측: pos 30 cm, 자세 19° 오차).
+      **XML 텍스트의 작성값**만이 STL raw 정점에 그대로 적용 가능한 값이다.
+    """
+    path = _EVAL_XML_PATH()
+    if not path or not os.path.exists(path):
+        return {}
+    want = {f"mesh_{n}": n for n, _fn, _b in EXO_MESHES}
+    out = {}
+    for g in ET.parse(path).getroot().iter("geom"):
+        gn = g.get("name")
+        if gn not in want:
+            continue
+        q = np.array([float(v) for v in (g.get("quat") or "1 0 0 0").split()])
+        w, x, y, z = q / np.linalg.norm(q)
+        R = np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+        p = np.array([float(v) for v in (g.get("pos") or "0 0 0").split()])
+        out[want[gn]] = (R, p)
+    if out:
+        print(f"[eval] CAD 배치 = eval XML 작성값 ({len(out)}/{len(EXO_MESHES)}개): "
+              f"{os.path.basename(path)}")
+    else:
+        print("[eval] ⚠️ eval XML 에서 CAD geom 을 못 찾음 — spec 전역앵커로 폴백")
+    return out
 
 
 def load_stl(path):
@@ -364,7 +446,49 @@ dof = mot["dof_pos"].numpy()
 muj = [MUJ.index(BONE[j]) for j in range(24)]
 gq = rbr[:, muj, :]                      # (T,24,4) xyzw, BONE 순서
 gp = rbp[:, muj, :].copy()
-gp[:, :, 0] -= gp[0, 0, 0]; gp[:, :, 1] -= gp[0, 0, 1]      # env origin 제거
+# ── 롤아웃 꼬리 오염 제거 (2026-09-08) ────────────────────────────────────
+#   추론이 남긴 .motion 은 **끝 1~2 프레임에서 펠비스가 수십~수백 m 튄다**
+#   (실측: 02_01 마지막 프레임 77.65 m 점프, 실제 보행은 3.28 m). 그대로 두면
+#   ① 그 프레임에 캐릭터가 화면 밖으로 날아가고 ② 정지 카메라의 프레이밍 계산이
+#   궤적 36 m 로 잘못 잡혀 거리 74 m 까지 물러난다(사람이 점이 된다).
+#   그래서 첫 점프 직전까지만 렌더한다. 임계값은 JUMP_M(기본 0.5 m/프레임).
+_JM = float(os.environ.get("JUMP_M", "0.5"))
+_stp = np.linalg.norm(np.diff(gp[:, 0, :2], axis=0), axis=1)
+_bad = np.where(_stp > _JM)[0]
+if len(_bad):
+    _good = int(_bad[0]) + 1                      # 점프 **직전** 프레임까지
+    print(f"[모션] ⚠️ 꼬리 오염 — 프레임 {_good}~{len(gp)-1} 에서 최대 {_stp.max():.1f} m 점프 → 잘라냄")
+    gq, gp, dof = gq[:_good], gp[:_good], dof[:_good]
+    NFR = min(NFR, _good)
+# ── 지형 (2026-09-01, render_seamless_isaacsim.py 에서 이식) ────────────────
+#   녹화가 남긴 <recording_dir>.terrain.pt (record.py::_build_terrain_save_data,
+#   키: height_field_raw / horizontal_scale / vertical_scale)를 읽어 평지 체커보드
+#   대신 **실제 지형 메시**를 깐다. 평지 지형은 녹화기가 저장하지 않으므로(is_flat)
+#   파일이 없으면 기존 평지 경로로 동작한다.
+#   ★ 지형 모드에서는 좌표를 **절대 월드 좌표로 유지**한다. 원점 재정렬을 하면
+#     캐릭터가 지형의 엉뚱한 지점에 놓인다.
+def _find_terrain(motion_path):
+    envp = os.environ.get("TERRAIN_PT", "")
+    if envp:
+        return envp if os.path.exists(envp) else None
+    d = os.path.dirname(os.path.abspath(motion_path))
+    for cand in (f"{d}.terrain.pt",
+                 os.path.join(d, os.path.basename(d) + ".terrain.pt"),
+                 os.path.splitext(motion_path)[0] + ".terrain.pt"):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+_tp = _find_terrain(MOTION)
+TERRAIN = torch.load(_tp, weights_only=False) if _tp else None
+if TERRAIN is not None:
+    _hf = np.asarray(TERRAIN["height_field_raw"])
+    _hs = float(TERRAIN["horizontal_scale"]); _vs = float(TERRAIN["vertical_scale"])
+    print(f"[terrain] {_tp}  heightfield {_hf.shape} h={_hs} v={_vs} "
+          f"고도 {_hf.min()*_vs:.3f}~{_hf.max()*_vs:.3f} m")
+else:
+    print("[terrain] 없음 → 평지 체커보드")
+    gp[:, :, 0] -= gp[0, 0, 0]; gp[:, :, 1] -= gp[0, 0, 1]      # env origin 제거
 T = len(gp)
 print(f"[모션] frames={T}  mode={MODE}")
 
@@ -386,6 +510,42 @@ _win = max(3, int(os.environ.get("CAM_SMOOTH", "45")))   # 1.5초 이동평균 =
 _k = np.ones(_win) / _win
 HEADING = np.convolve(np.pad(_hd, (_win, _win), mode="edge"), _k, mode="same")[_win:-_win]
 print(f"[카메라] heading 사전계산 완료 (평활 {_win}f, 총회전 {np.degrees(HEADING[-1]-HEADING[0]):+.0f}도)")
+
+# ── CAM=side_static : 영상 내내 **한 자리에 고정**된 측면 카메라 ──────────────
+#   사용자 지정 2026-09-08 "영상 중에 카메라가 움직이지 않았으면 합니다".
+#   기존 `side` 는 시선 방향만 월드 고정이고 위치는 골반을 따라가므로 배경이 흐른다.
+#   여기서는 클립 전체 골반 궤적을 미리 보고 eye/tgt 를 **한 번만** 정한다:
+#     · 방향 = 클립 **평균 진행방향의 직각** (모션마다 월드 방향이 달라도 항상 측면)
+#     · 거리 = 궤적 전체 + 사람 키가 화면에 들어오도록 화각에서 역산
+#   그래서 사람이 화면을 가로질러 걸어가고 카메라는 미동도 하지 않는다.
+CAM_STATIC = None
+if CAM_MODE == "side_static":
+    _f = 22.0; _ha, _va = 20.955, 15.2908          # cam.CreateFocalLengthAttr(22.0), USD 기본 aperture
+    _htan = (_ha / 2) / _f; _vtan = (_va / 2) / _f
+    _pp = gp[:, 0, :]                               # 골반 궤적 (T,3)
+    _h = float(np.arctan2(np.sin(HEADING).mean(), np.cos(HEADING).mean()))
+    _u = np.array([np.cos(_h), np.sin(_h)])         # 진행 방향 = 화면 가로축
+    _w = np.array([-np.sin(_h), np.cos(_h)])        # 측면(깊이) 방향
+    _c = 0.5 * (_pp.min(0) + _pp.max(0)); _c[2] = float(os.environ.get("CAM_Z", 0.9))
+    _su = float(np.ptp(_pp[:, :2] @ _u))            # 진행축 이동거리
+    _sw = float(np.ptp(_pp[:, :2] @ _w))            # 측면 흔들림 폭(깊이)
+    _need_h = _su + float(os.environ.get("CAM_PAD", 1.6))   # 좌우 여백(사람 폭+여유)
+    _need_v = float(os.environ.get("CAM_VSPAN", 2.3))       # 세로: 발끝~머리 + 여유
+    _D_full = max(_need_h / 2 / _htan, _need_v / 2 / _vtan) + _sw / 2 + 0.4  # 궤적 전체 포함
+    _D_near = float(os.environ.get("CAM_R", 3.6))                            # 추종 카메라와 같은 거리
+    # [ETRI 2026-09-08] "추종과 정지의 중간으로 줌" — CAM_BLEND 0=추종만큼 가깝게,
+    #   1=궤적 전체 포함. 기본 0.5. 단, **골반 궤적이 잘리지 않는 거리**를 하한으로 둔다
+    #   (안 그러면 가까이 당길수록 사람이 화면 밖으로 걸어 나간다).
+    _blend = float(os.environ.get("CAM_BLEND", "0.5"))
+    _D_fit = (_su + float(os.environ.get("CAM_PAD_MIN", "0.9"))) / 2 / _htan + _sw / 2
+    _D = _D_near + _blend * (_D_full - _D_near)
+    _D = max(_D, _D_fit, float(os.environ.get("CAM_MIN_R", 3.0)))
+    _eye = _c - _D * np.array([_w[0], _w[1], 0.0])
+    _eye[2] = _c[2] + float(os.environ.get("CAM_RISE", 0.35))
+    CAM_STATIC = (_eye, _c.copy())
+    print(f"[카메라] 정지 측면 — 진행 {np.degrees(_h):+.0f}도 · 이동 {_su:.2f} m · "
+          f"거리 {_D:.2f} m (추종 {_D_near:.1f} / 전체 {_D_full:.1f} / 잘림하한 {_D_fit:.1f}, "
+          f"blend {_blend}) · eye ({_eye[0]:+.2f},{_eye[1]:+.2f},{_eye[2]:+.2f})")
 
 # MJCF hinge 순서 = dof 순서 → 힙 굴곡 인덱스
 mroot = ET.parse(MJCF).getroot()
@@ -508,12 +668,31 @@ else:
     for bn in ("L_Hip", "R_Hip"):
         el = next(e for e in mroot.iter("body") if e.get("name") == bn)
         hip_local[bn] = np.array([float(v) for v in el.get("pos").split()])
-    t_pelvis = PELVIS_ANCHOR - R_CAD2MJCF @ (CAD_ANCHOR_MM * 0.001)
+
+    # ★ [ETRI 2026-09-07] CAD 배치는 **eval XML 의 작성 pos/quat** 을 정본으로 쓴다.
+    #   왜 바꿨나: 예전에는 `exosuit_spec` 의 전역 앵커 하나(cad_anchor_mm + cad_rot)로
+    #   세 STL 을 한꺼번에 놓았다. 그건 "CAD 3개가 하나의 전역 좌표계를 공유한다" 는
+    #   가정에 기댄 것인데, 2026-09-04 에 CAD 를 동료분 STL 로 통일하면서 그 가정이
+    #   깨졌다 — 힙 프레임과 허벅지가 STL 안에서 **19.49° 다른 자세**로 저장돼 있다.
+    #   그 결과 XML 은 갱신됐는데 spec 의 전역 quat 은 옛 값이라 **허벅지 스트럿만**
+    #   19.49° 틀어져 렌더됐다(사용자 지적). 파트별 pos/quat 을 XML 에서 직접 읽으면
+    #   CAD 를 다시 바꿔도 XML 만 맞으면 영상·이미지가 같은 배치로 나온다.
+    #   MuJoCo 는 메시를 자체 프레임으로 재정렬하고 geom_pos 로 보정하므로,
+    #   **작성 pos/quat 을 raw STL 정점에 그대로 적용**하면 MuJoCo 결과와 일치한다.
+    _cad_xf = _cad_placement_from_xml()
+    t_pelvis = (PELVIS_ANCHOR - R_CAD2MJCF @ (CAD_ANCHOR_MM * 0.001)
+                if CAD_ANCHOR_MM is not None else None)
     exo_verts = {}
     for name, fn, bodyname in EXO_MESHES:
-        V = (R_CAD2MJCF @ (load_stl(f"{MESH_DIR}/{fn}") * 0.001).T).T + t_pelvis
-        if bodyname != "Pelvis":
-            V = V - hip_local[bodyname]          # body 로컬
+        raw = load_stl(f"{MESH_DIR}/{fn}") * 0.001
+        if name in _cad_xf:
+            Rg, pg = _cad_xf[name]
+            V = (Rg @ raw.T).T + pg          # eval XML 작성값 (body 로컬)
+        else:
+            # 폴백: 옛 전역 앵커 방식 (XML 에 해당 geom 이 없는 슈트/자산용)
+            V = (R_CAD2MJCF @ raw.T).T + t_pelvis
+            if bodyname != "Pelvis":
+                V = V - hip_local[bodyname]
         m = UsdGeom.Mesh.Define(stage, f"/World/{name}")
         m.CreatePointsAttr([Gf.Vec3f(*map(float, p)) for p in V])
         m.CreateFaceVertexCountsAttr([3] * (len(V) // 3))
@@ -532,20 +711,23 @@ else:
     #   미사용으로 판단해 _deprecated_20260825/ 로 옮겼더니, 이 경로가 조용히
     #   실패하며 **가방이 통째로 렌더에서 사라졌다**(로그: "eval XML 없음").
     #   lbskin 판은 매번 재생성되므로 가방 위치 수정 등이 자동 반영된다.
-    _cands = [_P["dir"] / f"smpl_humanoid_{SPEC['label']}_for_eval_lbskin.xml",
-              _P["dir"] / f"smpl_humanoid_{SPEC['label']}_for_eval.xml"]
-    _eval_xml = os.environ.get("EVAL_XML") or str(next((c for c in _cands if c.exists()), _cands[0]))
+    _eval_xml = _EVAL_XML_PATH()
     keep_bodies = set()
+    n_strap = 0
     if os.path.exists(_eval_xml):
         eroot = ET.parse(_eval_xml).getroot()
         for b in eroot.iter("body"):
             for g in b.findall("geom"):
-                if g.get("name") in KEEP_PRIMS:
+                gname = g.get("name")
+                if gname in KEEP_PRIMS or is_strap(gname):
                     bn = b.get("name")
                     body_xform(bn)                      # 프레임마다 갱신되는 부모 Xform
-                    prim_from_mjcf_geom(f"/World/Model/{bn}/{g.get('name')}", g, EXO_RGB)
+                    rgb = geom_rgb(g, EXO_RGB) if is_strap(gname) else EXO_RGB
+                    prim_from_mjcf_geom(f"/World/Model/{bn}/{gname}", g, rgb)
                     keep_bodies.add(bn)
-        print(f"[eval] 슈트 primitive {len(keep_bodies)}개 body 에 {', '.join(sorted(KEEP_PRIMS))}")
+                    n_strap += int(is_strap(gname))
+        print(f"[eval] 슈트 primitive {len(keep_bodies)}개 body 에 {', '.join(sorted(KEEP_PRIMS))}"
+              + (f" + 고정 스트랩 {n_strap}개(XML 색)" if n_strap else ""))
     else:
         print(f"[eval] ⚠️  eval XML 없음 — 가방이 렌더에서 빠진다: {_eval_xml}")
         print("[eval] ⚠️  EVAL_XML 환경변수로 경로를 지정하거나 자산을 재생성할 것")
@@ -561,13 +743,64 @@ Y0 = min(-8, int(np.floor(gp[:, 0, 1].min())) - _MG); Y1 = max(10, int(np.ceil(g
 FLOOR_A = float(os.environ.get("FLOOR_A", "0.30"))     # 밝은 타일 / 어두운 타일 반사율
 FLOOR_B = float(os.environ.get("FLOOR_B", "0.24"))
 pts, cnts, idx, col = [], [], [], []
-vi = 0
-for ix in range(X0, X1):
-    for iy in range(Y0, Y1):
-        pts += [(ix, iy, 0), (ix + 1, iy, 0), (ix + 1, iy + 1, 0), (ix, iy + 1, 0)]
-        cnts.append(4); idx += [vi, vi + 1, vi + 2, vi + 3]; vi += 4
-        shade = FLOOR_A if (ix + iy) % 2 == 0 else FLOOR_B
-        col.append((shade, shade, shade + 0.015))
+if TERRAIN is None:
+    vi = 0
+    for ix in range(X0, X1):
+        for iy in range(Y0, Y1):
+            pts += [(ix, iy, 0), (ix + 1, iy, 0), (ix + 1, iy + 1, 0), (ix, iy + 1, 0)]
+            cnts.append(4); idx += [vi, vi + 1, vi + 2, vi + 3]; vi += 4
+            shade = FLOOR_A if (ix + iy) % 2 == 0 else FLOOR_B
+            col.append((shade, shade, shade + 0.015))
+else:
+    # 하이트필드를 캐릭터 경로 주변으로 잘라 정점 격자 + 쿼드로 만든다.
+    # 월드 대응은 get_heights_jit 과 같다: world_x = row*h, world_y = col*h.
+    _MARGIN = float(os.environ.get("TERRAIN_MARGIN", "7.0"))    # m
+    _use = gp[: min(NFR, len(gp))]
+    _x0 = _use[:, :, 0].min() - _MARGIN; _x1 = _use[:, :, 0].max() + _MARGIN
+    _y0 = _use[:, :, 1].min() - _MARGIN; _y1 = _use[:, :, 1].max() + _MARGIN
+    r0 = max(0, int(np.floor(_x0 / _hs))); r1 = min(_hf.shape[0] - 1, int(np.ceil(_x1 / _hs)))
+    c0 = max(0, int(np.floor(_y0 / _hs))); c1 = min(_hf.shape[1] - 1, int(np.ceil(_y1 / _hs)))
+    nr, nc = r1 - r0 + 1, c1 - c0 + 1
+    print(f"[terrain] crop row[{r0}:{r1}] col[{c0}:{c1}] = {nr}x{nc} 정점 "
+          f"({nr*nc:,}) / 쿼드 {(nr-1)*(nc-1):,}")
+    _rows = (np.arange(r0, r1 + 1) * _hs).astype(np.float64)
+    _cols = (np.arange(c0, c1 + 1) * _hs).astype(np.float64)
+    _zz = _hf[r0:r1 + 1, c0:c1 + 1].astype(np.float64) * _vs
+    _xx, _yy = np.meshgrid(_rows, _cols, indexing="ij")
+    _pts = np.stack([_xx.ravel(), _yy.ravel(), _zz.ravel()], axis=1)
+    _i = np.arange(nr - 1)[:, None]; _j = np.arange(nc - 1)[None, :]
+    _v00 = (_i * nc + _j).ravel()
+    _quad = np.stack([_v00, _v00 + nc, _v00 + nc + 1, _v00 + 1], axis=1)
+    idx = _quad.ravel().tolist(); cnts = [4] * _quad.shape[0]
+    _qx = _xx[:-1, :-1]; _qy = _yy[:-1, :-1]
+    _chk = ((np.floor(_qx).astype(int) + np.floor(_qy).astype(int)) % 2 == 0)
+    # ★ 체커(1 m)만으로는 **블록 지형이 안 보인다**. 체커는 평면 패턴이라 높이 정보가
+    #   없고, discrete 블록은 1~15 cm 라 확산광 아래서 음영 대비도 거의 없다.
+    #   FLOOR_MODE=contour 면 높이 등고선 밴드를 곱해 작은 단차를 드러낸다.
+    #     checker  기존(러프·경사에는 충분)
+    #     contour  체커 × 높이 밴드 — 블록/계단 확인용 (기본값)
+    #     height   높이만 (체커 없음) — 지형 형상만 볼 때
+    _MODE = os.environ.get("FLOOR_MODE", "contour")
+    _BAND = float(os.environ.get("FLOOR_BAND", "0.05"))     # m, 등고선 간격
+    _qz = _zz[:-1, :-1]
+    _base = np.where(_chk, FLOOR_A, FLOOR_B)
+    if _MODE == "checker":
+        _lum = _base
+    else:
+        _b = np.floor((_qz - _qz.min()) / _BAND).astype(int)
+        _alt = 1.0 - 0.22 * (_b % 2)                         # 한 밴드 걸러 22% 어둡게
+        _lum = (_base if _MODE == "contour" else 0.30) * _alt
+    _lum = _lum.ravel()
+    col = [(float(v), float(v), float(v + 0.015)) for v in _lum]
+    pts = [tuple(map(float, q)) for q in _pts]
+# 지형 위 카메라용 높이 조회. 월드→하이트필드 대응은 get_heights_jit 과 같다.
+def _terrain_h(x, y):
+    if TERRAIN is None:
+        return 0.0
+    r = int(np.clip(x / _hs, 0, _hf.shape[0] - 1))
+    c = int(np.clip(y / _hs, 0, _hf.shape[1] - 1))
+    return float(_hf[r, c]) * _vs
+
 ground = UsdGeom.Mesh.Define(stage, "/World/Ground")
 ground.CreatePointsAttr([Gf.Vec3f(*map(float, p)) for p in pts])
 ground.CreateFaceVertexCountsAttr(cnts); ground.CreateFaceVertexIndicesAttr(idx)
@@ -604,9 +837,9 @@ def lookat_mat(eye, tgt):
 
 
 # RTX 수렴용 서브프레임 수. **환경에 따라 writer 가 서브프레임마다 PNG 를 쓴다** —
-# standalone IsaacSim 은 스텝당 1장이지만, pip isaacsim + isaaclab 렌더링 경험에서는
-# 48장을 전부 쓴다. 1222프레임이 47,000장이 되어 mimsave 에서 OOM 이었다(2026-09-01).
-# 그런 환경에서는 RT_SUBFRAMES=1 로 낮춘다 — 화질은 조금 덜 수렴한다.
+# standalone IsaacSim(로컬)은 스텝당 1장이지만, pip isaacsim + isaaclab 렌더링 경험
+# (서버)에서는 48장을 전부 쓴다. 1222프레임이 47,000장이 되어 mimsave 에서 OOM 이었다
+# (2026-09-01). 그런 환경에서는 RT_SUBFRAMES=1 로 낮춘다 — 화질은 조금 덜 수렴한다.
 RT_SUBFRAMES = int(os.environ.get("RT_SUBFRAMES", "48"))
 OUTDIR = tempfile.mkdtemp(prefix=f"exosuit_{SUIT}_{MODE}_")
 _RW, _RH = (1080, 1920) if os.environ.get("PORTRAIT") == "1" else (1920, 1080)  # [ETRI] 세로모드
@@ -681,10 +914,43 @@ for i in range(NFR):
                 if mesh and mesh in exo_color_attr:
                     exo_color_attr[mesh].Set([Gf.Vec3f(*force_color(
                         float(EXO_TAU[fi, mi]), float(EXO_PEAK[mi])))])
-    tgt = gp[t, 0].copy(); tgt[2] = 0.9
+    if CAM_STATIC is not None:                 # 정지 카메라 — 프레임마다 바뀌지 않는다
+        cam_op.Set(lookat_mat(*CAM_STATIC))
+        sim.update()
+        rep.orchestrator.step(rt_subframes=RT_SUBFRAMES, delta_time=0.0, pause_timeline=True)
+        if i % 30 == 0:
+            print(f"  frame {i+1}/{NFR}")
+        continue
+    tgt = gp[t, 0].copy()
+    # ★ 평지에서는 0.9 로 고정해 상하 흔들림을 없앤다. 지형에서는 그러면 카메라가
+    #   지면 아래를 보게 된다(2026-09-01: 캐릭터 골반이 z~2 m 인데 0.9 를 봐서
+    #   화면이 전부 하늘/지형 뒷면이었다). 지형 높이에 얹어 같은 효과를 낸다.
+    tgt[2] = 0.9 + _terrain_h(tgt[0], tgt[1])
     if CAM_MODE == "turntable":
         a = 2.0 * np.pi * (i / max(NFR - 1, 1))          # 1회전 = 전체 길이
         eye = tgt + np.array([CAM_R * np.cos(a), CAM_R * np.sin(a), 0.55])
+    elif CAM_MODE == "quad_rel":
+        # [ETRI 2026-09-08 사용자 지정] 장척 모션(loop1200)용 — **CAM_SEG(기본 300) 프레임마다**
+        #   시점을 정면 → 좌측면 → 후면 → 우측면 으로 돌린다. 위치는 사람을 따라간다
+        #   (48 m 를 걸어가므로 정지 카메라로는 50 m 넘게 물러나야 해 지형이 안 보인다).
+        #   각도는 **진행방향 기준**이라 모션이 어느 방향으로 걸어도 같은 시점이 나온다.
+        #   거리 CAM_R(기본 5 m) — 지형이 화면에 넓게 깔리도록 사용자가 지정한 값.
+        _seg = max(1, int(os.environ.get("CAM_SEG", "300")))
+        # ★ 시점 이름은 **HUD 에 찍지 않는다** (사용자 지정 2026-09-08).
+        #   원래 "정면/좌측면/후면/우측면" 을 넣었는데 HUD 폰트가 DejaVuSans-Bold 라
+        #   한글 자형이 없어 □ 로 나갔다(loop1200 3편). 영상 텍스트에 한글을 넣지 않으며,
+        #   시점은 화면으로 자명하므로 라벨 자체를 뺐다. 구간 각도만 계산에 쓴다.
+        _b = [0.0, np.pi / 2, np.pi, -np.pi / 2][(i // _seg) % 4]
+        # ★ [ETRI 2026-09-08] 방향은 **클립 전체 평균 heading 하나로 고정**한다.
+        #   프레임별 HEADING[t] 를 쓰면 걸음마다 몸통 방향이 흔들려 카메라가 따라 떨린다
+        #   (사용자 지적: "카메라가 고개방향으로 흔들립니다"). 구간 안에서는 시선이
+        #   완전히 고정되고, 300프레임 경계에서만 4방향으로 끊어 바뀐다.
+        if not hasattr(np, "_etri_h0"):
+            np._etri_h0 = float(np.arctan2(np.sin(HEADING).mean(), np.cos(HEADING).mean()))
+            print(f"[카메라] quad_rel 고정 heading {np.degrees(np._etri_h0):+.1f}도 "
+                  f"(구간 {_seg}f · 거리 {CAM_R:.1f} m)")   # 콘솔 로그는 한글 무관
+        _a = np._etri_h0 + _b + np.radians(float(os.environ.get("CAM_YAW", "0")))
+        eye = tgt + np.array([CAM_R * np.cos(_a), CAM_R * np.sin(_a), 0.20 * CAM_R])
     elif CAM_MODE in ("front_rel", "back_rel", "side_rel"):
         # [ETRI 2026-08-28] 진행방향 기준 상대 카메라. 모션의 월드 방향과 무관하게
         #   항상 같은 앵글이 나온다(front_rel = 사람을 정면에서 바라봄).

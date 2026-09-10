@@ -343,6 +343,24 @@ SUITS = {
 }
 
 
+# ── exosuitHS_cable (케이블/스트랩 검토판) — **격리됨** ──────────────────
+# 2026-09-02 작업. 하이퍼셀 문서 4~5p 의 허벅지 고정 스트랩을 형상으로 표현한 판이다.
+# 여러 안(리프트 / 스트럿 압축 / 축방향 절단 + 회전 / 세로 컷)을 시도했으나 더 나은
+# 해결책을 찾기 전까지 **원본 hs 를 쓰기로** 하여 전체를 아래로 옮겼다:
+#
+#   data/assets/_backup/exosuitHS_cable_20260902/
+#     mjcf_exosuitHS_cable/          생성된 MJCF 2종 + INFO.md(시도 이력·수치·미해결 문제)
+#     mesh_exosuit_hs_cable/         편집된 CAD STL (원본 mesh/exosuit_hs 는 무변경)
+#     script/make_hs_cable_cad.py    STL 편집 스크립트
+#     script/exosuit_spec_hs_cable_block.py.txt   이 파일에서 걷어낸 SUITS["hs_cable"] 블록
+#     script/exosuit_spec.py.with_hs_cable        걷어내기 직전의 전체 사본
+#     script/render_commands_used.sh              사용한 렌더 명령
+#
+# 되살리려면 위 블록을 이 자리에 붙여넣고 두 폴더를 원래 자리로 옮기면 된다.
+# (렌더러 `render_exosuit_isaacsim.py` 의 스트랩 표시·sphere 지원은 남겨 두었다 —
+#  원본 hs 에는 해당 이름·타입의 표시 대상이 없어 아무 영향이 없다.)
+
+
 def get(suit: str) -> dict:
     if suit not in SUITS:
         raise SystemExit(f"알 수 없는 슈트 '{suit}'. 가능: {list(SUITS)}")
@@ -351,6 +369,30 @@ def get(suit: str) -> dict:
         raise SystemExit(f"'{suit}' ({s['vendor']}) 명세가 비어 있습니다 — {__file__} 를 먼저 채우세요.\n"
                          f"  {s['note']}")
     return s
+
+
+# ── ETRI 미참조 DOF 클램프 ────────────────────────────────────────────
+# 발가락·손 12 DOF 는 레퍼런스 모션이 구동하지 않는데 range 가 ±180° 로 열려 있어
+# 학습 중 고주파로 떤다(word_work/연구방향_상세설계.md 6.11절).
+#
+# ★ 이 제한은 **슈트 자산에만 격리한다**(2026-09-02 사용자 결정).
+#   `mjcf/smpl_humanoid.xml` 은 업스트림 ProtoMotions 원본 그대로(±180°) 두고,
+#   S1/S2 가 쓰는 슈트 XML 을 만들 때 여기서 주입한다. 맨몸 SMPL 은 사전학습을
+#   그대로 쓰므로 원본을 건드릴 이유가 없다.
+CLAMPED_DOF = tuple(f"{s}_{p}_{a}" for s in "LR" for p in ("Toe", "Hand") for a in "xyz")
+CLAMP_RANGE = "-5.0000 5.0000"
+
+
+def clamp_unused_dof(root, verbose: bool = True) -> int:
+    """MJCF 트리(파싱된 root)의 미참조 12 DOF range 를 ±5° 로 제한한다. 바뀐 개수 반환."""
+    n = 0
+    for j in root.iter("joint"):
+        if j.get("name") in CLAMPED_DOF and j.get("range") != CLAMP_RANGE:
+            j.set("range", CLAMP_RANGE)
+            n += 1
+    if verbose:
+        print(f"   ✔ 미참조 DOF 클램프 {n}/{len(CLAMPED_DOF)} 개 적용 (±5°, ETRI)")
+    return n
 
 
 def total_mass(suit: str) -> float:
@@ -373,12 +415,34 @@ def paths(suit: str) -> dict:
     s = SUITS[suit]
     label = s["label"]
     _ASSETS = _TASK_ROOT / s["task_dir"] / "data/assets"
-    d = _ASSETS / f"mjcf_newton_{label}"
+    # 폴더명은 기본 `mjcf_newton_<label>` 이지만 spec 의 dir_name 으로 덮어쓸 수 있다.
+    # (`_newton` 접미사는 걷어내는 방향 — `mjcf`/`mjcf_exosuitHS` 와 대칭을 맞춘다.)
+    d = _ASSETS / s.get("dir_name", f"mjcf_newton_{label}")
+    # ── base(맨몸 SMPL) ─────────────────────────────────────────────
+    # **단일 원본은 `mjcf/smpl_humanoid.xml`** (mjcf/INFO.md §1).
+    # 2026-08-27 정리 때 옛 이름(`smpl_humanoid_for_train.xml`)이 사라져 생성기가
+    # 실행 불가였고, 동시에 ETRI 의 발가락·손 12 DOF ±5° 클램프도 유실됐었다.
+    # 2026-09-02 클램프를 단일 원본에 복원했으므로 이제 이 파일 하나만 본다.
+    # 옛 이름이 남아 있는 다른 task_dir(exosuitCR 등)을 위해 뒤에 하나만 더 둔다.
+    _cands = [
+        _ASSETS / "mjcf/smpl_humanoid.xml",                  # 단일 원본(클램프 포함)
+        _ASSETS / "mjcf/smpl_humanoid_for_train.xml",        # 옛 이름이 남아 있는 폴더용
+    ]
+    _base = next((c for c in _cands if c.exists()), _cands[0])
+    # ── 자산 세대: **`_v2`(hs2)가 있으면 그것이 활성 자산이다** ──────────────
+    # [ETRI 2026-09-07] hs1(v1)은 `data/assets/_backup/hs1_20260907/` 로 격리했고
+    #   옛 경로에 링크도 남기지 않았다(사용자 지정: 논문에서 hs1↔hs2 를 비교하지 않는다).
+    #   여기서 _v2 를 먼저 고르지 않으면 렌더러가 사라진 v1 을 열어 죽는다
+    #   (2026-09-08 실측: `FileNotFoundError: ..._for_train.xml` 로 S1 영상 2편 실패).
+    def _gen(stem):
+        v2 = d / f"{stem}_v2.xml"
+        return v2 if v2.exists() else d / f"{stem}.xml"
+
     return dict(
-        assets=_ASSETS, dir=d, label=label,
-        train=d / f"smpl_humanoid_{label}_for_train.xml",
-        eval_skeleton=d / f"smpl_humanoid_{label}_for_eval_skeleton.xml",
-        eval_lbskin=d / f"smpl_humanoid_{label}_for_eval_lbskin.xml",
+        assets=_ASSETS, dir=d, label=label, base_train=_base,
+        train=_gen(f"smpl_humanoid_{label}_for_train"),
+        eval_skeleton=_gen(f"smpl_humanoid_{label}_for_eval_skeleton"),
+        eval_lbskin=_gen(f"smpl_humanoid_{label}_for_eval_lbskin"),
         usd=_ASSETS / f"usd_isaaclab_{label}",
         # eval XML 의 meshdir 는 ../mesh/skeleton 이므로 CAD 는 그 기준 상대경로로 참조
         mesh_rel=f"../{s['mesh_dir']}",
